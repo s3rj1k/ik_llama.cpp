@@ -1,0 +1,278 @@
+name: linux-amd64-standalone
+
+# Builds Linux amd64 tarballs for ik_llama with two CPU baselines:
+#   - x86-64-v3 : broad compatibility (Intel Haswell 2013+, AMD Excavator 2015+)
+#   - znver1    : tuned for AMD Zen 1 (EPYC Naples / Ryzen 1000 series)
+#
+# Both bundle llama-server, llama-cli, llama-quantize, llama-bench. CPU
+# inference only — every accelerator backend is explicitly disabled. SSL is
+# enabled via dynamic OpenSSL. Each variant is uploaded as an Actions
+# artifact; a combined index page with both downloads is published to
+# GitHub Pages.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64-v3
+            march: x86-64-v3
+            label: "x86-64-v3 (Intel Haswell+ / AMD Excavator+)"
+          - name: znver1
+            march: znver1
+            label: "AMD Zen 1 (EPYC Naples / Ryzen 1000)"
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0    # build-info needs full history for BUILD_NUMBER
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            libssl-dev libcurl4-openssl-dev
+
+      - name: Configure (${{ matrix.name }})
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_SERVER_SSL=ON \
+            -DLLAMA_CURL=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_LTO=ON \
+            -DGGML_FATAL_WARNINGS=ON \
+            -DGGML_AVX=ON -DGGML_AVX2=ON \
+            -DGGML_FMA=ON -DGGML_F16C=ON \
+            -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF \
+            -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF \
+            -DGGML_CUDA=OFF -DGGML_MUSA=OFF \
+            -DGGML_HIPBLAS=OFF -DGGML_VULKAN=OFF \
+            -DGGML_SYCL=OFF -DGGML_KOMPUTE=OFF \
+            -DGGML_METAL=OFF -DGGML_RPC=OFF \
+            -DGGML_BLAS=OFF -DGGML_ACCELERATE=OFF \
+            -DCMAKE_C_FLAGS="-march=${{ matrix.march }}" \
+            -DCMAKE_CXX_FLAGS="-march=${{ matrix.march }}"
+
+      - name: Build (${{ matrix.name }})
+        run: |
+          time cmake --build build -j $(nproc) \
+            --target llama-server llama-cli llama-quantize llama-bench
+
+      - name: Inspect runtime dependencies
+        run: |
+          set -euo pipefail
+          BAD=0
+          # We build with -DBUILD_SHARED_LIBS=OFF so the *project's own* libs
+          # (libllama, libggml*, libcommon, libmtmd) must be statically linked
+          # into each binary — they must NOT appear in ldd output. System libs
+          # (libssl, libcurl, libgomp, ...) are dynamic by design.
+          for bin in llama-server llama-cli llama-quantize llama-bench; do
+            echo "=== ldd $bin ==="
+            ldd build/bin/$bin
+            project_so=$(ldd build/bin/$bin \
+              | awk '/=>/ {print $1}' \
+              | grep -E '^(libllama|libggml|libcommon|libmtmd)' || true)
+            if [ -n "$project_so" ]; then
+              echo "::error::$bin links project libs dynamically (BUILD_SHARED_LIBS=OFF expected static):"
+              printf '%s\n' "$project_so"
+              BAD=1
+            fi
+          done
+          [ "$BAD" -eq 0 ]
+
+      - name: Verify SSL linkage
+        run: |
+          ldd build/bin/llama-server | grep -E "libssl|libcrypto"
+          build/bin/llama-server --help 2>&1 | grep -iE "ssl-(key|cert|san|valid)" | head -10
+
+      - name: Stage tarball (${{ matrix.name }})
+        run: |
+          PKG=ik_llama-linux-amd64-${{ matrix.name }}
+          mkdir -p stage/$PKG
+          cp build/bin/llama-server   stage/$PKG/
+          cp build/bin/llama-cli      stage/$PKG/
+          cp build/bin/llama-quantize stage/$PKG/
+          cp build/bin/llama-bench    stage/$PKG/
+          tar -C stage -czf $PKG.tar.gz $PKG
+          sha256sum $PKG.tar.gz > $PKG.tar.gz.sha256
+
+      - name: Upload llama (Actions artifact)
+        uses: actions/upload-artifact@v7
+        with:
+          name: ik_llama-linux-amd64-${{ matrix.name }}
+          path: |
+            ik_llama-linux-amd64-${{ matrix.name }}.tar.gz
+            ik_llama-linux-amd64-${{ matrix.name }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  package_pages:
+    needs: build
+    runs-on: ubuntu-22.04
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: ik_llama-linux-amd64-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Stage Pages content
+        run: |
+          mkdir -p pages-out
+          cp artifacts/ik_llama-linux-amd64-*.tar.gz       pages-out/
+          cp artifacts/ik_llama-linux-amd64-*.tar.gz.sha256 pages-out/
+          ls -l pages-out
+          cat > pages-out/index.html <<EOF
+          <!doctype html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>ik_llama &mdash; Linux amd64, CPU-only, OpenSSL</title>
+          <style>
+            :root { color-scheme: light dark; }
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+              max-width: 720px;
+              margin: 2em auto;
+              padding: 0 1em 3em;
+              line-height: 1.55;
+            }
+            h1 { font-size: 1.5em; margin: 0 0 0.4em; }
+            h2 { font-size: 1.1em; margin: 1.6em 0 0.5em; }
+            p { margin: 0.6em 0; }
+            code, pre {
+              font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+              font-size: 0.9em;
+            }
+            code {
+              background: rgba(127,127,127,0.15);
+              padding: 0.1em 0.35em;
+              border-radius: 3px;
+            }
+            pre {
+              background: rgba(127,127,127,0.1);
+              border: 1px solid rgba(127,127,127,0.25);
+              padding: 0.8em 1em;
+              border-radius: 6px;
+              overflow-x: auto;
+              line-height: 1.4;
+            }
+            pre code { background: none; padding: 0; font-size: inherit; }
+            a { color: #0a66c2; text-decoration: none; }
+            a:hover { text-decoration: underline; }
+            @media (prefers-color-scheme: dark) {
+              a { color: #6cb6ff; }
+            }
+            ul { padding-left: 1.2em; }
+            .meta { color: #888; font-size: 0.9em; }
+            .variant { margin: 1em 0; }
+          </style>
+          </head>
+          <body>
+          <h1>ik_llama &mdash; Linux amd64, CPU-only, OpenSSL</h1>
+
+          <p class="meta">Built from commit
+          <a href="https://github.com/${{ github.repository }}/commit/${{ github.sha }}"><code>${{ github.sha }}</code></a>
+          on ref <code>${{ github.ref_name }}</code>.</p>
+
+          <p>Self-contained tarballs with the four most-used ik_llama binaries:
+          <code>llama-server</code>, <code>llama-cli</code>,
+          <code>llama-quantize</code>, <code>llama-bench</code>. CPU inference
+          only &mdash; every GPU/accelerator backend is disabled. ik_llama's
+          IQK matmul and FlashAttention kernels are enabled (256-bit AVX2 tier).</p>
+
+          <h2>Pick a build</h2>
+
+          <div class="variant">
+            <p><strong>x86-64-v3</strong> &mdash; broad compatibility baseline.
+            Runs on any Intel&nbsp;Haswell (2013+) or AMD&nbsp;Excavator (2015+)
+            or newer CPU. Pick this if unsure.</p>
+            <ul>
+              <li><a href="ik_llama-linux-amd64-x86-64-v3.tar.gz">ik_llama-linux-amd64-x86-64-v3.tar.gz</a> &middot;
+                  <a href="ik_llama-linux-amd64-x86-64-v3.tar.gz.sha256">.sha256</a></li>
+            </ul>
+          </div>
+
+          <div class="variant">
+            <p><strong>znver1</strong> &mdash; tuned for AMD Zen&nbsp;1
+            (EPYC&nbsp;Naples 7xx1, Ryzen&nbsp;1000 series, Threadripper&nbsp;1xxx).
+            Same ISA features as x86-64-v3 plus Zen-1-specific pipeline
+            scheduling (split 128-bit AVX2, narrow front-end). Marginal
+            speed-up over the v3 build on those CPUs; will not run on
+            non-Zen-1 hardware.</p>
+            <ul>
+              <li><a href="ik_llama-linux-amd64-znver1.tar.gz">ik_llama-linux-amd64-znver1.tar.gz</a> &middot;
+                  <a href="ik_llama-linux-amd64-znver1.tar.gz.sha256">.sha256</a></li>
+            </ul>
+          </div>
+
+          <h2>Runtime requirements</h2>
+          <ul>
+            <li>Linux x86_64 with <code>glibc &ge; 2.35</code> (Ubuntu&nbsp;22.04+, Debian&nbsp;12+, Fedora&nbsp;36+, RHEL&nbsp;9+)</li>
+            <li><code>libssl3</code> + <code>libcrypto3</code> (OpenSSL&nbsp;3.x) &mdash; for HTTPS in <code>llama-server</code></li>
+            <li><code>libcurl4</code> &mdash; for downloading models from HuggingFace (e.g. <code>llama-cli -hf user/repo</code>)</li>
+            <li><code>libgomp1</code>, <code>libstdc++6</code>, <code>libgcc-s1</code> &mdash; standard system libraries</li>
+          </ul>
+
+          <h2>First run</h2>
+          <pre><code>tar xzf ik_llama-linux-amd64-&lt;variant&gt;.tar.gz
+          cd ik_llama-linux-amd64-&lt;variant&gt;
+          ./llama-server --help
+          </code></pre>
+
+          <h2>Bundled binaries</h2>
+          <pre><code>./llama-server   --help    # HTTP API server (with --ssl-san-* support)
+          ./llama-cli      --help    # interactive / one-shot inference CLI
+          ./llama-quantize --help    # GGUF model quantization
+          ./llama-bench    --help    # inference benchmarking
+          </code></pre>
+
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: pages-out
+
+  deploy:
+    needs: package_pages
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
