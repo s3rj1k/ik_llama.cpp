@@ -229,6 +229,13 @@ server:
          --api-key-file FNAME     path to file containing API keys (default: none)
          --ssl-key-file FNAME     path to file a PEM-encoded SSL private key
          --ssl-cert-file FNAME    path to file a PEM-encoded SSL certificate
+         --ssl-san-dns LIST       comma-separated DNS names for SAN of an auto-generated self-signed certificate;
+                                  if set and --ssl-key-file/--ssl-cert-file are not, the server generates an
+                                  ephemeral ECDSA P-256 cert in memory at startup
+         --ssl-san-ip LIST        comma-separated IP addresses for SAN of an auto-generated self-signed certificate;
+                                  see --ssl-san-dns
+         --ssl-validity-days N    validity period in days for the auto-generated self-signed certificate
+                                  (default: 365)
          --timeout N              server read/write timeout in seconds (default: 600)
          --threads-http N         number of threads used to process HTTP requests (default: -1)
          --system-prompt-file FNAME
@@ -343,6 +350,11 @@ services:
   cmake -B build -DLLAMA_SERVER_SSL=ON
   cmake --build build --config Release -t llama-server
   ```
+
+There are two ways to enable HTTPS at runtime:
+
+- Supply your own certificate with `--ssl-key-file` and `--ssl-cert-file`.
+- Set `--ssl-san-dns` and/or `--ssl-san-ip` to have the server generate a single ephemeral ECDSA P-256 self-signed certificate at startup, with the supplied names/addresses in `subjectAltName`. The certificate lives only in memory for the lifetime of the process. Use `--ssl-validity-days` to override the default 365-day validity. The two modes are mutually exclusive.
 
 ## Web UI
 

@@ -495,6 +495,9 @@ struct gpt_params {
 
     std::string ssl_file_key  = "";
     std::string ssl_file_cert = "";
+    std::string ssl_san_dns   = ""; // comma-separated DNS names for self-signed cert SAN
+    std::string ssl_san_ip    = ""; // comma-separated IPs for self-signed cert SAN
+    int         ssl_validity_days = 365;
 
 
 

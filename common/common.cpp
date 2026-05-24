@@ -2404,6 +2404,21 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         params.ssl_file_cert = argv[i];
         return true;
     }
+    if (arg == "--ssl-san-dns") {
+        CHECK_ARG
+        params.ssl_san_dns = argv[i];
+        return true;
+    }
+    if (arg == "--ssl-san-ip") {
+        CHECK_ARG
+        params.ssl_san_ip = argv[i];
+        return true;
+    }
+    if (arg == "--ssl-validity-days") {
+        CHECK_ARG
+        params.ssl_validity_days = std::stoi(argv[i]);
+        return true;
+    }
     if (arg == "--timeout" || arg == "-to") {
         CHECK_ARG
         params.timeout_read  = std::stoi(argv[i]);
@@ -3213,6 +3228,14 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "server",      "       --api-key-file FNAME",   "path to file containing API keys (default: none)" });
     options.push_back({ "server",      "       --ssl-key-file FNAME",   "path to file a PEM-encoded SSL private key" });
     options.push_back({ "server",      "       --ssl-cert-file FNAME",  "path to file a PEM-encoded SSL certificate" });
+    options.push_back({ "server",      "       --ssl-san-dns LIST",
+                                                                        "comma-separated DNS names for SAN of an auto-generated self-signed certificate;\n"
+                                                                        "if set and --ssl-key-file/--ssl-cert-file are not, the server generates an\n"
+                                                                        "ephemeral ECDSA P-256 cert in memory at startup" });
+    options.push_back({ "server",      "       --ssl-san-ip LIST",
+                                                                        "comma-separated IP addresses for SAN of an auto-generated self-signed certificate;\n"
+                                                                        "see --ssl-san-dns" });
+    options.push_back({ "server",      "       --ssl-validity-days N",  "validity period in days for the auto-generated self-signed certificate (default: %d)", params.ssl_validity_days });
     options.push_back({ "server",      "       --timeout N",            "server read/write timeout in seconds (default: %d)", params.timeout_read });
     options.push_back({ "server",      "       --threads-http N",       "number of threads used to process HTTP requests (default: %d)", params.n_threads_http });
     options.push_back({ "server",      "       --system-prompt-file FNAME",
